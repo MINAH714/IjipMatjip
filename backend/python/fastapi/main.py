@@ -140,6 +140,7 @@ from PIL import Image
 import boto3
 import uuid # 고유한 파일명 생성을 위한 uuid 라이브러리 가져오기
 
+
 # .env 파일에서 환경 변수 로드
 load_dotenv()
 
