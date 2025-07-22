@@ -1,135 +1,110 @@
-from fastapi import FastAPI, Response, Body, HTTPException, Query
-from pydantic import BaseModel, Field
-from typing import List, Union, Literal
-from matplotlib.figure import Figure
-import matplotlib.pyplot as plt
-import io
-import uvicorn
-from fastapi.middleware.cors import CORSMiddleware
+import os
+import json
+from dotenv import load_dotenv
+import vertexai
+from vertexai.preview.vision_models import ImageGenerationModel, Image
 
-app = FastAPI()
+# .env 파일 로드
+load_dotenv()
 
-# --- CORS 설정 (이전과 동일) ---
-origins = [
-    "http://localhost:3000",
-    "http://127.0.0.1:3000",
-    "http://13.236.16.220:4002",
-]
-
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=origins,
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
-# --- CORS 설정 끝 ---
-
-# --- Pydantic 모델 정의 (이전과 동일) ---
-class RectangleFurniture(BaseModel):
-    type: Literal["rectangle"] = "rectangle"
-    x1: float = Field(..., description="직사각형의 첫 번째 대각선 꼭짓점 X좌표 (mm).")
-    y1: float = Field(..., description="직사각형의 첫 번째 대각선 꼭짓점 Y좌표 (mm).")
-    x2: float = Field(..., description="직사각형의 두 번째 대각선 꼭짓점 X좌표 (mm).")
-    y2: float = Field(..., description="직사각형의 두 번째 대각선 꼭짓점 Y좌표 (mm).")
-    color: str = Field("blue", description="가구 색상 (CSS 색상 이름 또는 HEX 코드).")
-    label: str = Field("직사각형 가구", description="가구 라벨.")
-
-class CircleFurniture(BaseModel):
-    type: Literal["circle"] = "circle"
-    center_x: float = Field(..., description="원의 중심 X좌표 (mm).")
-    center_y: float = Field(..., description="원의 중심 Y좌표 (mm).")
-    radius: float = Field(..., gt=0, description="원의 반지름 (mm, 0보다 커야 함).")
-    color: str = Field("red", description="가구 색상 (CSS 색상 이름 또는 HEX 코드).")
-    label: str = Field("원형 가구", description="가구 라벨.")
-
-Furniture = Union[RectangleFurniture, CircleFurniture]
-
-# --- 새로운 Pydantic 모델 정의: 요청 본문의 구조를 명확히 합니다 ---
-# React가 {"furniture": [...]} 형태로 데이터를 보내므로, 이 구조에 맞춥니다.
-class RoomPlanRequest(BaseModel):
-    furniture: List[Furniture] = Field(..., description="방에 배치할 가구 목록.")
-    # 만약 나중에 width나 height도 본문에 포함시키고 싶다면 여기에 추가할 수 있습니다.
-    # width: float = Field(..., description="방의 가로 길이 (mm).")
-    # height: float = Field(..., description="방의 세로 길이 (mm).")
+# Vertex AI 프로젝트 설정
+PROJECT_ID = "virtual-muse-466706-v2"
+LOCATION = "us-central1"
+vertexai.init(project=PROJECT_ID, location=LOCATION)
 
 
-# --- FastAPI 엔드포인트 수정 ---
-@app.post("/room-plan/")
-async def create_room_plan_with_furniture(
-    # 방의 너비와 높이는 여전히 URL 쿼리 파라미터로 받습니다.
-    width: float = Query(..., gt=0, description="방의 가로 길이 (mm, 0보다 커야 함)."),
-    height: float = Query(..., gt=0, description="방의 세로 길이 (mm, 0보다 커야 함)."),
-    # 요청 본문은 이제 RoomPlanRequest 모델에 따라 파싱됩니다.
-    request_body: RoomPlanRequest = Body(..., description="평면도 생성을 위한 요청 본문 데이터.")
-):
+# ----------------- 여기가 수정된 프롬프트 생성 함수입니다 -----------------
+
+def create_revised_prompt_from_json(json_data):
     """
-    방 크기와 가구 목록을 받아 2D 평면도를 PNG 이미지로 생성합니다.
-    방과 가구의 좌표는 (0,0)을 기준으로 합니다.
+    JSON 데이터를 기반으로 AI가 이해하기 쉬운 서술형 프롬프트를 생성합니다.
     """
-    # 요청 본문에서 가구 목록을 추출합니다.
-    furniture_to_draw = request_body.furniture
+    scene = json_data["scene"]
+    room = scene["room"]
+    objects = scene["objects"]
 
-    if width <= 0 or height <= 0:
-        raise HTTPException(status_code=400, detail="가로와 세로 길이는 양수여야 합니다.")
+    # 기본 스타일과 분위기 설정 (가장 중요)
+    prompt_parts = [
+        "A photorealistic 3D render of a bright, clean, and modern Korean-style bedroom.",
+        "The room has simple white wallpaper and light-colored wood linoleum flooring.",
+        "The overall aesthetic is minimalist, calm, and uncluttered, with a focus on natural textures and soft lighting."
+    ]
 
-    fig = Figure(figsize=(width / 100, height / 100))
-    ax = fig.add_subplot(111)
+    # 객체 정보를 자연스러운 문장으로 변환
+    object_descriptions = []
+    for obj in objects:
+        obj_type = obj["type"]
+        obj_name = obj["name"]
+        material = obj.get("material", "a generic material")
 
-    room_rectangle = plt.Rectangle((0, 0), width, height,
-                                   edgecolor='black', facecolor='lightgray',
-                                   linewidth=2, label=f"방 ({width}x{height} mm)")
-    ax.add_patch(room_rectangle)
+        # 좌표 대신 상대적 위치를 묘사합니다.
+        if obj_name == "bed":
+            object_descriptions.append(f"A low-profile bed with an {material} is placed in the bottom-left area of the room.")
+        elif obj_name == "desk":
+            object_descriptions.append(f"A simple desk with a {material} is set against the bottom wall on the right side.")
+        elif obj_name == "wardrobe":
+            object_descriptions.append(f"A tall, {material} wardrobe stands in the top-right corner, against the right wall.")
+        elif obj_name == "main_door":
+            object_descriptions.append(f"A {material} door is on the right wall.")
+        elif obj_name == "main_window":
+            # 창문은 '뒤쪽 벽 중앙'과 같이 핵심적인 위치만 강조합니다.
+            object_descriptions.append("A large window is centered on the back wall, letting in soft, natural light.")
 
-    # --- 가구 그리기: 이제 furniture_to_draw를 사용합니다 ---
-    for item in furniture_to_draw:
-        if item.type == "rectangle":
-            x_min = min(item.x1, item.x2)
-            y_min = min(item.y1, item.y2)
-            rect_width = abs(item.x2 - item.x1)
-            rect_height = abs(item.y2 - item.y1)
+    prompt_parts.extend(object_descriptions)
 
-            if not (0 <= x_min and x_min + rect_width <= width and
-                    0 <= y_min and y_min + rect_height <= height):
-                print(f"경고: 직사각형 가구 '{item.label}'가 방 경계를 벗어났습니다. 그리지 않습니다.")
-                continue
+    # 최종적인 구도와 퀄리티 요구사항 추가
+    prompt_parts.extend([
+        "The view is a wide-angle shot, showing the entire room including the floor, ceiling, and all walls.",
+        "No furniture or objects are cut off by the frame.",
+        "The scene is rendered with realistic shadows and a natural, gentle light source from the window.",
+        "Avoid any excessive decorations, clutter, or overly luxurious materials like marble."
+    ])
+    
+    return " ".join(prompt_parts)
 
-            rect_furniture = plt.Rectangle((x_min, y_min), rect_width, rect_height,
-                                           edgecolor='black', facecolor=item.color,
-                                           alpha=0.7, label=item.label)
-            ax.add_patch(rect_furniture)
-            ax.text(x_min + rect_width / 2, y_min + rect_height / 2, item.label,
-                    ha='center', va='center', fontsize=8, color='white', weight='bold')
+# ----------------- 여기까지 함수가 변경됩니다 -----------------
 
-        elif item.type == "circle":
-            if not (0 <= item.center_x - item.radius and item.center_x + item.radius <= width and
-                    0 <= item.center_y - item.radius and item.center_y + item.radius <= height):
-                print(f"경고: 원형 가구 '{item.label}'가 방 경계를 벗어났습니다. 그리지 않습니다.")
-                continue
 
-            circle_furniture = plt.Circle((item.center_x, item.center_y), item.radius,
-                                          edgecolor='black', facecolor=item.color,
-                                          alpha=0.7, label=item.label)
-            ax.add_patch(circle_furniture)
-            ax.text(item.center_x, item.center_y, item.label,
-                    ha='center', va='center', fontsize=8, color='white', weight='bold')
+def generate_image_with_imagen(prompt: str, output_filename: str = "generated_image.png"):
+    """
+    Vertex AI Imagen 모델을 사용하여 이미지를 생성하고 파일로 저장합니다.
+    (이 함수는 기존 코드를 그대로 사용합니다.)
+    """
+    print("✅ Imagen 모델을 사용하여 이미지 생성을 시작합니다...")
+    model = ImageGenerationModel.from_pretrained("imagegeneration@006")
+    images = model.generate_images(
+        prompt=prompt,
+        number_of_images=1
+    )
+    if images:
+        images[0].save(location=output_filename, include_generation_parameters=True)
+        print(f"🎉 이미지가 '{output_filename}' 파일로 성공적으로 저장되었습니다.")
+        return output_filename
+    else:
+        print("❌ 이미지 생성에 실패했습니다.")
+        return None
 
-    ax.set_xlim(0, width)
-    ax.set_ylim(0, height)
-    ax.set_xlabel(f"가로 (mm)")
-    ax.set_ylabel(f"세로 (mm)")
-    ax.set_title(f"방 평면도: {width}mm x {height}mm (가구 포함)")
-    ax.set_aspect('equal', adjustable='box')
-    ax.grid(True)
-    ax.legend(loc='upper right', bbox_to_anchor=(1.2, 1))
+# 제공된 JSON 데이터 (기존과 동일)
+json_input_data = {
+    "scene": {
+        "description": "...",
+        "walls": { "...": {} },
+        "room": { "width": 4000, "depth": 3000, "height": 2700 },
+        "objects": [
+            { "type": "door", "name": "main_door", "wall": 2, "dimensions": { "width": 900, "height": 2100 }, "position": { "x": 4000, "y": 500 }, "material": "white painted wood" },
+            { "type": "window", "name": "main_window", "wall": 3, "dimensions": { "width": 1200, "height": 1200 }, "position": { "x": 1400, "y": 3000 }, "details": "..." },
+            { "type": "furniture", "name": "bed", "dimensions": { "width": 2000, "depth": 1500 }, "position": { "x": 600, "y": 600 }, "material": "oak frame with white bedding" },
+            { "type": "furniture", "name": "desk", "dimensions": { "width": 1200, "depth": 600 }, "position": { "x": 2400, "y": 400 }, "material": "maple top, metal legs" },
+            { "type": "furniture", "name": "wardrobe", "dimensions": { "width": 800, "depth": 600 }, "position": { "x": 3500, "y": 2200 }, "material": "white matte finish" }
+        ]
+    }
+}
 
-    buf = io.BytesIO()
-    fig.savefig(buf, format="png", bbox_inches='tight', dpi=300)
-    buf.seek(0)
-    plt.close(fig)
+# **수정된 함수를 사용하여 프롬프트 생성**
+generated_prompt = create_revised_prompt_from_json(json_input_data)
+print("--- [수정된] 생성된 이미지 프롬프트 ---")
+print(generated_prompt)
+print("\n--- 이미지 생성 시도 ---")
 
-    return Response(content=buf.getvalue(), media_type="image/png")
-
-# --- Uvicorn 서버 실행 설정 (이전과 동일) ---
-if __name__ == "__main__":
-    uvicorn.run("main:app", host="0.0.0.0", port=3002, reload=True)
+# 수정된 이미지 생성 함수 호출
+generate_image_with_imagen(generated_prompt, output_filename="room_layout_revised.png")
