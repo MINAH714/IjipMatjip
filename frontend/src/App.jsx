@@ -1,11 +1,10 @@
-import './App.css'
-import Test from './components/Test.jsx'
+import Category from './Category.jsx'; // category.jsx 파일을 불러옵니다.
 
 function App() {
 
-  return (
+  return (  
     <>
-      <Test/>
+      <Category/>
     </>
   )
 }
